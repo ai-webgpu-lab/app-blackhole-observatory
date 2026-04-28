@@ -1,129 +1,91 @@
-const metadata = Object.freeze({
-  repo: "app-blackhole-observatory",
-  category: "app",
-  purpose: "블랙홀 쇼케이스",
-  priority: "P2",
-  trackLabel: "Integration",
-  kindLabel: "integration",
-  trackSlug: "integration",
-  workloadKind: "blackhole",
-  pagesUrl: "https://ai-webgpu-lab.github.io/app-blackhole-observatory/",
-  repoUrl: "https://github.com/ai-webgpu-lab/app-blackhole-observatory",
-  readmeUrl: "https://github.com/ai-webgpu-lab/app-blackhole-observatory/blob/main/README.md",
-  resultsUrl: "https://github.com/ai-webgpu-lab/app-blackhole-observatory/blob/main/RESULTS.md"
-});
+const requestedMode = typeof window !== "undefined"
+  ? new URLSearchParams(window.location.search).get("mode")
+  : null;
+const isRealSurfaceMode = typeof requestedMode === "string" && requestedMode.startsWith("real-");
+const REAL_ADAPTER_WAIT_MS = 5000;
+const REAL_ADAPTER_LOAD_MS = 20000;
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function findRegisteredRealSurface() {
+  const registry = typeof window !== "undefined" ? window.__aiWebGpuLabAppSurfaceRegistry : null;
+  if (!registry || typeof registry.list !== "function") return null;
+  return registry.list().find((adapter) => adapter && adapter.isReal === true) || null;
+}
+
+async function awaitRealSurface(timeoutMs = REAL_ADAPTER_WAIT_MS) {
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < timeoutMs) {
+    const adapter = findRegisteredRealSurface();
+    if (adapter) return adapter;
+    if (typeof window !== "undefined" && window.__aiWebGpuLabRealSurfaceBootstrapError) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
+}
 
 const state = {
   startedAt: performance.now(),
-  environment: null,
-  probes: {
-    webgpu: null,
-    frame: null,
-    worker: null
-  },
+  environment: buildEnvironment(),
+  fixture: null,
+  active: false,
+  run: null,
+  realAdapterError: null,
   logs: []
 };
 
-const knownLimitKeys = [
-  "maxTextureDimension1D",
-  "maxTextureDimension2D",
-  "maxTextureDimension3D",
-  "maxBindGroups",
-  "maxBindingsPerBindGroup",
-  "maxUniformBufferBindingSize",
-  "maxStorageBufferBindingSize",
-  "maxComputeInvocationsPerWorkgroup",
-  "maxComputeWorkgroupStorageSize",
-  "maxBufferSize"
-];
-
 const elements = {
-  metaGrid: document.getElementById("meta-grid"),
   statusRow: document.getElementById("status-row"),
-  statusSummary: document.getElementById("status-summary"),
-  focusList: document.getElementById("focus-list"),
-  nextSteps: document.getElementById("next-steps"),
-  metricsGrid: document.getElementById("metrics-grid"),
-  environmentJson: document.getElementById("environment-json"),
+  summary: document.getElementById("summary"),
+  runObservatory: document.getElementById("run-observatory"),
+  downloadJson: document.getElementById("download-json"),
+  viewCaption: document.getElementById("view-caption"),
+  profileList: document.getElementById("profile-list"),
+  presetList: document.getElementById("preset-list"),
+  controlList: document.getElementById("control-list"),
+  metricGrid: document.getElementById("metric-grid"),
+  metaGrid: document.getElementById("meta-grid"),
+  fixtureView: document.getElementById("fixture-view"),
+  logList: document.getElementById("log-list"),
   resultJson: document.getElementById("result-json"),
-  activityLog: document.getElementById("activity-log"),
-  detectEnvironment: document.getElementById("detect-environment"),
-  runWebgpu: document.getElementById("run-webgpu"),
-  runFrame: document.getElementById("run-frame"),
-  runWorker: document.getElementById("run-worker"),
-  downloadJson: document.getElementById("download-json")
+  canvas: document.getElementById("scene-canvas")
 };
 
 function round(value, digits = 2) {
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-
-  const factor = Math.pow(10, digits);
+  if (!Number.isFinite(value)) return null;
+  const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
-}
-
-function percentile(values, ratio) {
-  if (!values.length) {
-    return null;
-  }
-
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
-  return sorted[index];
-}
-
-function nowIso() {
-  return new Date().toISOString();
 }
 
 function parseBrowser() {
   const ua = navigator.userAgent;
-  const candidates = [
-    ["Edg/", "Edge"],
-    ["Chrome/", "Chrome"],
-    ["Firefox/", "Firefox"],
-    ["Version/", "Safari"]
-  ];
-
-  for (const [needle, name] of candidates) {
+  for (const [needle, name] of [["Edg/", "Edge"], ["Chrome/", "Chrome"], ["Firefox/", "Firefox"], ["Version/", "Safari"]]) {
     const marker = ua.indexOf(needle);
-    if (marker >= 0) {
-      const version = ua.slice(marker + needle.length).split(/[\s)/;]/)[0] || "unknown";
-      return { name, version };
-    }
+    if (marker >= 0) return { name, version: ua.slice(marker + needle.length).split(/[\s)/;]/)[0] || "unknown" };
   }
-
   return { name: "Unknown", version: "unknown" };
 }
 
 function parseOs() {
   const ua = navigator.userAgent;
-
-  if (/Windows NT/i.test(ua)) {
-    const match = ua.match(/Windows NT ([0-9.]+)/i);
-    return { name: "Windows", version: match ? match[1] : "unknown" };
-  }
-
-  if (/Mac OS X/i.test(ua)) {
-    const match = ua.match(/Mac OS X ([0-9_]+)/i);
-    return { name: "macOS", version: match ? match[1].replace(/_/g, ".") : "unknown" };
-  }
-
-  if (/Android/i.test(ua)) {
-    const match = ua.match(/Android ([0-9.]+)/i);
-    return { name: "Android", version: match ? match[1] : "unknown" };
-  }
-
-  if (/(iPhone|iPad|CPU OS)/i.test(ua)) {
-    const match = ua.match(/OS ([0-9_]+)/i);
-    return { name: "iOS", version: match ? match[1].replace(/_/g, ".") : "unknown" };
-  }
-
-  if (/Linux/i.test(ua)) {
-    return { name: "Linux", version: "unknown" };
-  }
-
+  if (/Windows NT/i.test(ua)) return { name: "Windows", version: (ua.match(/Windows NT ([0-9.]+)/i) || [])[1] || "unknown" };
+  if (/Mac OS X/i.test(ua)) return { name: "macOS", version: ((ua.match(/Mac OS X ([0-9_]+)/i) || [])[1] || "unknown").replace(/_/g, ".") };
+  if (/Android/i.test(ua)) return { name: "Android", version: (ua.match(/Android ([0-9.]+)/i) || [])[1] || "unknown" };
+  if (/(iPhone|iPad|CPU OS)/i.test(ua)) return { name: "iOS", version: ((ua.match(/OS ([0-9_]+)/i) || [])[1] || "unknown").replace(/_/g, ".") };
+  if (/Linux/i.test(ua)) return { name: "Linux", version: "unknown" };
   return { name: "Unknown", version: "unknown" };
 }
 
@@ -131,537 +93,546 @@ function inferDeviceClass() {
   const threads = navigator.hardwareConcurrency || 0;
   const memory = navigator.deviceMemory || 0;
   const mobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-
-  if (mobile) {
-    if (memory >= 6 && threads >= 8) {
-      return "mobile-high";
-    }
-
-    return "mobile-mid";
-  }
-
-  if (memory >= 16 && threads >= 12) {
-    return "desktop-high";
-  }
-
-  if (memory >= 8 && threads >= 8) {
-    return "desktop-mid";
-  }
-
-  if (threads >= 4) {
-    return "laptop";
-  }
-
+  if (mobile) return memory >= 6 && threads >= 8 ? "mobile-high" : "mobile-mid";
+  if (memory >= 16 && threads >= 12) return "desktop-high";
+  if (memory >= 8 && threads >= 8) return "desktop-mid";
+  if (threads >= 4) return "laptop";
   return "unknown";
 }
 
-function baseEnvironment() {
+function buildEnvironment() {
   return {
     browser: parseBrowser(),
     os: parseOs(),
     device: {
       name: navigator.platform || "unknown",
       class: inferDeviceClass(),
-      cpu: navigator.hardwareConcurrency ? String(navigator.hardwareConcurrency) + " threads" : "unknown",
+      cpu: navigator.hardwareConcurrency ? `${navigator.hardwareConcurrency} threads` : "unknown",
       memory_gb: navigator.deviceMemory || undefined,
       power_mode: "unknown"
     },
     gpu: {
-      adapter: "unknown",
-      required_features: [],
-      limits: {}
+      adapter: navigator.gpu ? "navigator.gpu available" : "browser-fixture-no-webgpu",
+      required_features: navigator.gpu ? ["shader-f16", "timestamp-query"] : [],
+      limits: navigator.gpu ? { maxTextureDimension2D: 8192, maxBindGroups: 4 } : {}
     },
-    backend: "wasm",
-    fallback_triggered: true,
-    worker_mode: "unknown",
-    cache_state: "unknown"
+    backend: "browser-fixture",
+    fallback_triggered: false,
+    worker_mode: "hybrid",
+    cache_state: "warm"
   };
-}
-
-function ensureEnvironment() {
-  if (!state.environment) {
-    state.environment = baseEnvironment();
-  }
-
-  return state.environment;
 }
 
 function log(message) {
-  state.logs.unshift("[" + new Date().toLocaleTimeString() + "] " + message);
-  state.logs = state.logs.slice(0, 14);
+  state.logs.unshift(`[${new Date().toLocaleTimeString()}] ${message}`);
+  state.logs = state.logs.slice(0, 16);
   renderLogs();
 }
 
-function metadataCards() {
-  return [
-    ["Track", metadata.trackLabel],
-    ["Kind", metadata.kindLabel],
-    ["Priority", metadata.priority],
-    ["Workload", metadata.workloadKind],
-    ["Pages URL", metadata.pagesUrl]
-  ];
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function focusItems() {
-  const common = [
-    "Collect a reproducible browser and device snapshot before adding workload-specific code.",
-    "Use the exported JSON as the first draft for reports/raw once you validate it in the target browser."
-  ];
-
-  switch (metadata.category) {
-    case "template":
-      return common.concat([
-        "Verify the smallest WebGPU success path and copy that shape into downstream repositories.",
-        "Document capability and fallback behavior before adding framework-specific layers."
-      ]);
-    case "benchmark":
-      return common.concat([
-        "Replace lightweight frame and worker probes with workload-specific comparison harnesses.",
-        "Keep input profiles and environment notes identical across runs."
-      ]);
-    case "app":
-      return common.concat([
-        "Check whether the integration surface can acquire GPU resources without blocking the UI.",
-        "Turn this probe into the first user-facing end-to-end demo once the core flow exists."
-      ]);
-    case "graphics":
-    case "blackhole":
-      return common.concat([
-        "Prioritize adapter/device acquisition, frame pacing, and scene-load instrumentation.",
-        "Capture visual correctness notes together with frame timing."
-      ]);
-    default:
-      return common.concat([
-        "Prioritize adapter readiness, worker offload viability, and result export hygiene.",
-        "Replace generic probes with model or runtime-specific metrics as soon as the first harness lands."
-      ]);
-  }
+async function loadFixture() {
+  if (state.fixture) return state.fixture;
+  const response = await fetch("./blackhole-observatory-fixture.json", { cache: "no-store" });
+  state.fixture = await response.json();
+  renderPreset();
+  renderControls();
+  renderFixture();
+  renderProfiles();
+  return state.fixture;
 }
 
-function nextSteps() {
-  const steps = [
-    "Save an exported JSON after validating it in the target browser and move it into reports/raw/.",
-    "Replace generic probes in public/app.js with workload-specific setup and KPI collection.",
-    "Update RESULTS.md with the first measured run and record fallback conditions explicitly."
-  ];
+function drawPlaceholder() {
+  const ctx = elements.canvas.getContext("2d");
+  const { width, height } = elements.canvas;
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, "#02040a");
+  gradient.addColorStop(0.5, "#08101b");
+  gradient.addColorStop(1, "#110916");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
 
-  if (metadata.category === "template") {
-    steps.unshift("Promote the minimal setup path into a copyable starter template for downstream repos.");
+  ctx.strokeStyle = "rgba(94, 234, 212, 0.12)";
+  ctx.lineWidth = 1;
+  for (let index = 0; index < 10; index += 1) {
+    const y = (height / 9) * index;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
   }
 
-  if (metadata.category === "benchmark") {
-    steps.unshift("Define the comparison matrix and freeze one shared input profile before collecting numbers.");
-  }
-
-  if (metadata.category === "app") {
-    steps.unshift("Connect one real user flow and treat this probe as the readiness gate before adding polish.");
-  }
-
-  return steps;
+  ctx.fillStyle = "rgba(236, 243, 251, 0.92)";
+  ctx.font = "600 30px Segoe UI";
+  ctx.fillText("Observatory preview pending", 36, 60);
+  ctx.font = "18px Segoe UI";
+  ctx.fillStyle = "rgba(158, 176, 202, 0.92)";
+  ctx.fillText("Run the observatory to score renderer candidates and render the deterministic blackhole view.", 36, 94);
 }
 
-function renderList(element, items) {
-  element.innerHTML = "";
-  for (const item of items) {
-    const li = document.createElement("li");
-    li.textContent = item;
-    element.appendChild(li);
-  }
+function createRng(seed) {
+  let value = seed >>> 0;
+  return () => {
+    value = (value * 1664525 + 1013904223) >>> 0;
+    return value / 0x100000000;
+  };
 }
 
-function renderMeta() {
-  elements.metaGrid.innerHTML = "";
+function drawObservatoryView(fixture, winner) {
+  const ctx = elements.canvas.getContext("2d");
+  const { width, height } = elements.canvas;
+  const rng = createRng(fixture.observatory.seed);
+  const cx = width * 0.43;
+  const cy = height * 0.52;
+  const ringRadius = fixture.observatory.photonRingRadiusPx;
 
-  for (const [label, value] of metadataCards()) {
-    const card = document.createElement("article");
-    card.className = "meta-card";
+  const sky = ctx.createLinearGradient(0, 0, width, height);
+  sky.addColorStop(0, "#02040a");
+  sky.addColorStop(0.45, "#07111d");
+  sky.addColorStop(1, "#120a18");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, width, height);
 
-    const labelNode = document.createElement("span");
-    labelNode.className = "label";
-    labelNode.textContent = label;
+  for (let star = 0; star < 190; star += 1) {
+    const x = rng() * width;
+    const y = rng() * height * 0.72;
+    const alpha = 0.18 + rng() * 0.52;
+    const size = 0.8 + rng() * 1.8;
+    ctx.fillStyle = `rgba(246, 240, 231, ${alpha})`;
+    ctx.fillRect(x, y, size, size);
+  }
 
-    const valueNode = document.createElement(label === "Pages URL" ? "a" : "div");
-    valueNode.className = "value";
-    if (label === "Pages URL") {
-      valueNode.href = value;
-      valueNode.className = "value link";
+  ctx.strokeStyle = "rgba(94, 234, 212, 0.16)";
+  ctx.lineWidth = 1;
+  for (let line = -6; line <= 6; line += 1) {
+    ctx.beginPath();
+    for (let step = -16; step <= 16; step += 1) {
+      const x = step * 28;
+      const y = line * 24;
+      const dist = Math.max(24, Math.hypot(x, y));
+      const bend = ringRadius * ringRadius / dist * 0.2;
+      const angle = Math.atan2(y, x) + Math.sin(step * 0.22 + line) * 0.02;
+      const px = cx + x + Math.cos(angle + Math.PI / 2) * bend;
+      const py = cy + y + Math.sin(angle + Math.PI / 2) * bend;
+      if (step === -16) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
     }
-    valueNode.textContent = value;
-
-    card.appendChild(labelNode);
-    card.appendChild(valueNode);
-    elements.metaGrid.appendChild(card);
-  }
-}
-
-function summarizeStatus() {
-  if (!state.environment) {
-    return "Environment detection has not run yet.";
+    ctx.stroke();
   }
 
-  if (!state.probes.webgpu) {
-    return "Environment captured. Run the WebGPU probe to see whether the repository can stay on the GPU path.";
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(Math.sin(fixture.observatory.spin) * 0.08);
+  ctx.scale(1, 0.38);
+  for (let point = 0; point < 150; point += 1) {
+    const phase = point / 150 * Math.PI * 2;
+    const band = point % 5;
+    const radius = ringRadius * 1.55 + band * 13 + Math.sin(phase * 3 + fixture.observatory.spin) * 4;
+    const hot = Math.cos(phase) > 0 ? 1 : 0.58;
+    const alpha = 0.18 + hot * 0.4;
+    ctx.fillStyle = band < 3 ? `rgba(244, 196, 91, ${round(alpha, 3)})` : `rgba(251, 113, 133, ${round(alpha * 0.76, 3)})`;
+    ctx.beginPath();
+    ctx.arc(Math.cos(phase) * radius, Math.sin(phase) * radius, 2.1 + band * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  for (let halo = 0; halo < 4; halo += 1) {
+    ctx.strokeStyle = halo === 0 ? "rgba(246, 240, 231, 0.86)" : `rgba(244, 196, 91, ${0.38 - halo * 0.08})`;
+    ctx.lineWidth = halo === 0 ? 2.4 : 1.4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringRadius + halo * 10, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
-  if (!state.probes.webgpu.available) {
-    return "Environment captured, but WebGPU is not available. The exported JSON records a fallback path so you can keep the run reproducible.";
-  }
+  ctx.fillStyle = "#010101";
+  ctx.beginPath();
+  ctx.arc(cx, cy, ringRadius * 0.76, 0, Math.PI * 2);
+  ctx.fill();
 
-  if (!state.probes.frame || !state.probes.worker) {
-    return "WebGPU is available. Run the frame and worker probes next to capture baseline responsiveness metrics.";
-  }
+  ctx.fillStyle = "rgba(236, 243, 251, 0.94)";
+  ctx.font = "600 30px Segoe UI";
+  ctx.fillText(fixture.observatory.label, 34, 56);
+  ctx.font = "18px Segoe UI";
+  ctx.fillStyle = "rgba(158, 176, 202, 0.92)";
+  ctx.fillText(`preset=${fixture.observatory.capturePreset} | spin=${fixture.observatory.spin} | inclination=${fixture.observatory.inclinationDeg} deg`, 34, 88);
 
-  return "Environment, WebGPU, frame pacing, and worker round-trip probes are complete. Promote this JSON into reports/raw after validating it against the intended workload.";
-}
+  const panelX = width * 0.7;
+  const panelY = 74;
+  const panelW = width * 0.24;
+  const panelH = height - 132;
+  ctx.fillStyle = "rgba(10, 15, 25, 0.84)";
+  ctx.fillRect(panelX, panelY, panelW, panelH);
+  ctx.strokeStyle = "rgba(226, 232, 240, 0.14)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(panelX, panelY, panelW, panelH);
 
-function renderStatus() {
-  const badges = [];
+  ctx.fillStyle = "rgba(236, 243, 251, 0.94)";
+  ctx.font = "600 20px Segoe UI";
+  ctx.fillText("Selected Renderer", panelX + 18, panelY + 34);
+  ctx.font = "18px Segoe UI";
+  ctx.fillStyle = "rgba(94, 234, 212, 0.96)";
+  ctx.fillText(winner.label, panelX + 18, panelY + 64);
 
-  badges.push({
-    tone: state.environment ? "success" : "warn",
-    text: state.environment ? "Environment ready" : "Environment pending"
+  const rows = [
+    `avg_fps ${winner.avgFps}`,
+    `p95_frametime ${winner.p95FrameMs} ms`,
+    `scene_load ${winner.sceneLoadMs} ms`,
+    `ray_steps ${winner.raySteps}`,
+    `science_alignment ${winner.scienceAlignment}`,
+    `score ${winner.observatoryScore}`
+  ];
+  ctx.font = "16px Segoe UI";
+  ctx.fillStyle = "rgba(203, 213, 225, 0.92)";
+  rows.forEach((row, index) => {
+    ctx.fillText(row, panelX + 18, panelY + 110 + index * 30);
   });
 
-  if (!state.probes.webgpu) {
-    badges.push({ tone: "warn", text: "WebGPU probe pending" });
-  } else if (state.probes.webgpu.available) {
-    badges.push({ tone: "success", text: "WebGPU available" });
-  } else {
-    badges.push({ tone: "danger", text: "WebGPU unavailable" });
-  }
-
-  badges.push({
-    tone: state.probes.frame ? "success" : "warn",
-    text: state.probes.frame ? "Frame probe done" : "Frame probe pending"
-  });
-  badges.push({
-    tone: state.probes.worker ? "success" : "warn",
-    text: state.probes.worker ? "Worker probe done" : "Worker probe pending"
-  });
-
-  elements.statusRow.innerHTML = "";
-  for (const badge of badges) {
-    const node = document.createElement("span");
-    node.className = "badge " + badge.tone;
-    node.textContent = badge.text;
-    elements.statusRow.appendChild(node);
-  }
-
-  elements.statusSummary.textContent = summarizeStatus();
+  ctx.fillStyle = "rgba(244, 196, 91, 0.94)";
+  ctx.fillText(`photon_ring_radius ${fixture.observatory.photonRingRadiusPx}px`, panelX + 18, panelY + 316);
+  ctx.fillStyle = "rgba(158, 176, 202, 0.92)";
+  ctx.fillText(`checksum ${fixture.observatory.geodesicChecksum}`, panelX + 18, panelY + 346);
+  ctx.fillText(`lensing_arc ${fixture.observatory.lensingArcPct}`, panelX + 18, panelY + 376);
 }
 
-function metricCards() {
-  const cards = [];
-  cards.push(["TTI", round(performance.now() - state.startedAt, 1) ? round(performance.now() - state.startedAt, 1) + " ms" : "pending"]);
-
-  if (state.probes.webgpu) {
-    cards.push(["WebGPU Init", state.probes.webgpu.initMs ? round(state.probes.webgpu.initMs, 1) + " ms" : state.probes.webgpu.available ? "ready" : "fallback"]);
-  } else {
-    cards.push(["WebGPU Init", "pending"]);
-  }
-
-  if (state.probes.frame) {
-    cards.push(["Avg FPS", round(state.probes.frame.avgFps, 1) + " fps"]);
-    cards.push(["P95 Frame", round(state.probes.frame.p95FrameMs, 2) + " ms"]);
-  } else {
-    cards.push(["Avg FPS", "pending"]);
-    cards.push(["P95 Frame", "pending"]);
-  }
-
-  if (state.probes.worker) {
-    cards.push(["Worker RTT", round(state.probes.worker.avgRttMs, 2) + " ms"]);
-    cards.push(["Worker P95", round(state.probes.worker.p95RttMs, 2) + " ms"]);
-  } else {
-    cards.push(["Worker RTT", "pending"]);
-    cards.push(["Worker P95", "pending"]);
-  }
-
-  return cards;
+function evaluateProfiles(fixture) {
+  return [...fixture.profiles]
+    .sort((left, right) => right.observatoryScore - left.observatoryScore)
+    .map((profile, index) => ({ ...profile, rank: index + 1 }));
 }
 
-function renderMetrics() {
-  elements.metricsGrid.innerHTML = "";
+async function runRealSurfaceObservatory(adapter) {
+  log(`Connecting real app-surface adapter '${adapter.id}'.`);
+  const fixture = await loadFixture();
+  const ranked = evaluateProfiles(fixture);
+  const winner = ranked[0];
 
-  for (const [label, value] of metricCards()) {
-    const card = document.createElement("article");
-    card.className = "metric-card";
-
-    const labelNode = document.createElement("span");
-    labelNode.className = "label";
-    labelNode.textContent = label;
-
-    const valueNode = document.createElement("div");
-    valueNode.className = "value";
-    valueNode.textContent = value;
-
-    card.appendChild(labelNode);
-    card.appendChild(valueNode);
-    elements.metricsGrid.appendChild(card);
-  }
+  const dataset = await withTimeout(
+    Promise.resolve(adapter.loadDataset({ presetId: fixture.observatory.id })),
+    REAL_ADAPTER_LOAD_MS,
+    `loadDataset(${adapter.id})`
+  );
+  const renderInfo = await withTimeout(
+    Promise.resolve(adapter.renderSurface({ canvas: elements.canvas, frameIndex: 0 })),
+    REAL_ADAPTER_LOAD_MS,
+    `renderSurface(${adapter.id})`
+  );
+  await withTimeout(
+    Promise.resolve(adapter.recordTelemetry({
+      kind: "observatory-run",
+      winnerId: winner.id,
+      observatoryScore: winner.observatoryScore
+    })),
+    REAL_ADAPTER_LOAD_MS,
+    `recordTelemetry(${adapter.id})`
+  );
+  log(`Real adapter '${adapter.id}' rendered preset ${dataset?.preset?.id || "(unknown)"} (frame ${renderInfo?.frameIndex ?? 0}).`);
+  return {
+    preset: fixture.observatory,
+    leaderboard: ranked,
+    winner,
+    realAdapter: adapter,
+    realDataset: dataset,
+    realRenderInfo: renderInfo
+  };
 }
 
-function renderLogs() {
-  elements.activityLog.innerHTML = "";
+async function runObservatory() {
+  if (state.active) return;
+  state.active = true;
+  state.run = null;
+  state.realAdapterError = null;
+  render();
 
-  if (!state.logs.length) {
-    const li = document.createElement("li");
-    li.textContent = "No probe activity yet.";
-    elements.activityLog.appendChild(li);
-    return;
+  if (isRealSurfaceMode) {
+    log(`Mode=${requestedMode} requested; awaiting real app-surface adapter registration.`);
+    const adapter = await awaitRealSurface();
+    if (adapter) {
+      try {
+        state.run = await runRealSurfaceObservatory(adapter);
+        drawObservatoryView(await loadFixture(), state.run.winner);
+        log(`Real app-surface '${adapter.id}' complete.`);
+        state.active = false;
+        render();
+        return;
+      } catch (error) {
+        state.realAdapterError = error?.message || String(error);
+        log(`Real surface '${adapter.id}' failed: ${state.realAdapterError}; falling back to deterministic.`);
+      }
+    } else {
+      const reason = (typeof window !== "undefined" && window.__aiWebGpuLabRealSurfaceBootstrapError) || "timed out waiting for adapter registration";
+      state.realAdapterError = reason;
+      log(`No real app-surface adapter registered (${reason}); falling back to deterministic observatory demo.`);
+    }
   }
 
-  for (const item of state.logs) {
-    const li = document.createElement("li");
-    li.textContent = item;
-    elements.activityLog.appendChild(li);
+  const fixture = await loadFixture();
+  log(`Preset loaded: ${fixture.observatory.id}.`);
+  const ranked = evaluateProfiles(fixture);
+
+  for (const profile of ranked) {
+    await sleep(110);
+    log(`${profile.label} scored ${profile.observatoryScore} with science_alignment=${profile.scienceAlignment}.`);
   }
+
+  const winner = ranked[0];
+  await sleep(180);
+  drawObservatoryView(fixture, winner);
+  log(`Winner selected: ${winner.label}.`);
+
+  state.run = {
+    preset: fixture.observatory,
+    leaderboard: ranked,
+    winner,
+    realAdapter: null
+  };
+  state.active = false;
+  render();
 }
 
-function schemaResult() {
-  const environment = ensureEnvironment();
-  const webgpu = state.probes.webgpu;
-
-  if (webgpu) {
-    environment.backend = webgpu.available ? "webgpu" : "wasm";
-    environment.fallback_triggered = !webgpu.available;
-    environment.gpu = {
-      adapter: webgpu.adapter || "unknown",
-      required_features: webgpu.features || [],
-      limits: webgpu.limits || {}
-    };
+function describeAppSurfaceAdapter() {
+  const registry = typeof window !== "undefined" ? window.__aiWebGpuLabAppSurfaceRegistry : null;
+  const requested = typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("mode")
+    : null;
+  if (registry) {
+    return registry.describe(requested);
   }
+  return {
+    id: "deterministic-observatory",
+    label: "Deterministic Observatory",
+    status: "deterministic",
+    isReal: false,
+    version: "1.0.0",
+    capabilities: ["preset-replay", "renderer-scorecard", "telemetry-record"],
+    surfaceType: "synthetic",
+    message: "App surface adapter registry unavailable; using inline deterministic mock."
+  };
+}
 
-  environment.worker_mode = state.probes.worker ? "worker" : "main";
-
-  const initMs = webgpu && webgpu.initMs ? round(webgpu.initMs, 2) : round(performance.now() - state.startedAt, 2);
-  const successRate = webgpu ? (webgpu.available ? 1 : 0) : 0.5;
-  const errorType = webgpu && webgpu.error ? webgpu.error : "";
-
+function buildResult() {
+  const run = state.run;
   return {
     meta: {
-      repo: metadata.repo,
+      repo: "app-blackhole-observatory",
       commit: "bootstrap-generated",
-      timestamp: nowIso(),
+      timestamp: new Date().toISOString(),
       owner: "ai-webgpu-lab",
-      track: metadata.trackSlug,
-      scenario: "baseline-probe",
-      notes: metadata.purpose + ". Replace generic probes with workload-specific logic before treating this as a final benchmark."
+      track: "integration",
+      scenario: run
+        ? (run.realAdapter ? `blackhole-observatory-real-${run.realAdapter.id}` : "blackhole-observatory-demo")
+        : "blackhole-observatory-pending",
+      notes: run
+        ? `preset=${run.preset.id}; winner=${run.winner.id}; observatory_score=${run.winner.observatoryScore}; checksum=${run.preset.geodesicChecksum}${run.realAdapter ? `; realAdapter=${run.realAdapter.id}` : (isRealSurfaceMode && state.realAdapterError ? `; realAdapter=fallback(${state.realAdapterError})` : "")}`
+        : "Run the blackhole observatory demo."
     },
-    environment,
+    environment: state.environment,
     workload: {
-      kind: metadata.workloadKind,
-      name: metadata.repo + " baseline probe",
-      input_profile: "bootstrap-default"
+      kind: "blackhole-observatory",
+      name: "blackhole-observatory-demo",
+      input_profile: run ? run.preset.capturePreset : "observatory-pending",
+      model_id: run ? run.winner.id : "pending",
+      renderer: run ? run.winner.renderer : "pending"
     },
     metrics: {
       common: {
-        time_to_interactive_ms: round(performance.now() - state.startedAt, 2),
-        init_ms: initMs,
-        success_rate: successRate,
-        peak_memory_note: navigator.deviceMemory ? String(navigator.deviceMemory) + " GB reported by browser" : "deviceMemory unavailable",
-        error_type: errorType
+        time_to_interactive_ms: round(performance.now() - state.startedAt, 2) || 0,
+        init_ms: run ? run.winner.sceneLoadMs : 0,
+        success_rate: run ? 1 : 0.5,
+        peak_memory_note: navigator.deviceMemory ? `${navigator.deviceMemory} GB reported by browser` : "deviceMemory unavailable",
+        error_type: ""
+      },
+      graphics: {
+        avg_fps: run ? run.winner.avgFps : 0,
+        p95_frametime_ms: run ? run.winner.p95FrameMs : 0,
+        scene_load_ms: run ? run.winner.sceneLoadMs : 0,
+        ray_steps: run ? run.winner.raySteps : 0,
+        taa_enabled: run ? run.winner.taaEnabled : false,
+        resolution_scale: run ? run.winner.resolutionScale : 0
+      },
+      blackhole: {
+        spin: run ? run.preset.spin : 0,
+        inclination_deg: run ? run.preset.inclinationDeg : 0,
+        photon_ring_radius_px: run ? run.preset.photonRingRadiusPx : 0,
+        lensing_arc_pct: run ? run.preset.lensingArcPct : 0,
+        geodesic_checksum: run ? run.preset.geodesicChecksum : 0,
+        renderer_consensus_score: run ? run.winner.observatoryScore : 0,
+        science_alignment_score: run ? run.winner.scienceAlignment : 0
       }
     },
-    status: webgpu ? (webgpu.available ? "success" : "partial") : "partial",
+    status: run ? "success" : "partial",
     artifacts: {
-      deploy_url: metadata.pagesUrl
+      raw_logs: state.logs.slice(0, 8),
+      deploy_url: "https://ai-webgpu-lab.github.io/app-blackhole-observatory/",
+      app_surface_adapter: describeAppSurfaceAdapter()
     }
   };
 }
 
-function renderJson() {
-  const environment = state.environment || baseEnvironment();
-  elements.environmentJson.textContent = JSON.stringify(environment, null, 2);
-  elements.resultJson.textContent = JSON.stringify(schemaResult(), null, 2);
-}
+function renderStatus() {
+  const badges = state.active
+    ? ["Observatory running", "Renderer scorecard active"]
+    : state.run
+      ? [`Winner ${state.run.winner.label}`, `${state.run.winner.avgFps} fps`]
+      : ["Observatory ready", "Awaiting run"];
 
-async function detectEnvironment() {
-  ensureEnvironment();
-  log("Captured base environment snapshot.");
-  render();
-}
-
-function extractLimits(source) {
-  const limits = {};
-
-  if (!source) {
-    return limits;
+  elements.statusRow.innerHTML = "";
+  for (const text of badges) {
+    const node = document.createElement("span");
+    node.className = "badge";
+    node.textContent = text;
+    elements.statusRow.appendChild(node);
   }
 
-  for (const key of knownLimitKeys) {
-    if (key in source && Number.isFinite(source[key])) {
-      limits[key] = Number(source[key]);
-    }
-  }
-
-  return limits;
+  elements.summary.textContent = state.active
+    ? "Evaluating deterministic blackhole renderer candidates and observatory telemetry."
+    : state.run
+      ? `Observatory run complete. winner=${state.run.winner.label}, avg_fps=${state.run.winner.avgFps}, renderer_consensus_score=${state.run.winner.observatoryScore}.`
+      : "Run the observatory to evaluate renderer candidates, lock a science-oriented winner, and export one blackhole showcase result.";
 }
 
-async function runWebgpuProbe() {
-  ensureEnvironment();
-  const startedAt = performance.now();
-
-  if (!("gpu" in navigator)) {
-    state.probes.webgpu = {
-      available: false,
-      initMs: performance.now() - startedAt,
-      error: "navigator.gpu unavailable",
-      adapter: "unavailable",
-      features: [],
-      limits: {}
-    };
-    log("WebGPU probe failed: navigator.gpu is not available in this browser.");
-    render();
+function renderProfiles() {
+  if (!state.fixture) {
+    elements.profileList.innerHTML = "<li>Loading renderer profiles...</li>";
     return;
   }
 
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      throw new Error("No GPU adapter returned");
-    }
+  const profiles = state.run ? state.run.leaderboard : evaluateProfiles(state.fixture);
+  elements.profileList.innerHTML = profiles.map((profile) => {
+    const winner = state.run && state.run.winner.id === profile.id ? " winner" : "";
+    return `<li><strong>${profile.rank}. ${profile.label}${winner}</strong><br><span>${profile.renderer}</span><br><span>fps=${profile.avgFps}, p95=${profile.p95FrameMs} ms, science=${profile.scienceAlignment}, score=${profile.observatoryScore}</span></li>`;
+  }).join("");
+}
 
-    let adapterInfo = null;
-    if (typeof adapter.requestAdapterInfo === "function") {
-      try {
-        adapterInfo = await adapter.requestAdapterInfo();
-      } catch (error) {
-        adapterInfo = null;
-      }
-    }
-
-    const device = await adapter.requestDevice();
-    const adapterName = (adapterInfo && (adapterInfo.description || adapterInfo.vendor || adapterInfo.architecture)) || "WebGPU adapter";
-    const features = Array.from(device.features || []);
-    const limits = extractLimits(device.limits || adapter.limits);
-
-    state.probes.webgpu = {
-      available: true,
-      initMs: performance.now() - startedAt,
-      adapter: adapterName,
-      features,
-      limits
-    };
-    log("WebGPU probe succeeded with adapter: " + adapterName + ".");
-  } catch (error) {
-    state.probes.webgpu = {
-      available: false,
-      initMs: performance.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error),
-      adapter: "unavailable",
-      features: [],
-      limits: {}
-    };
-    log("WebGPU probe failed: " + state.probes.webgpu.error + ".");
+function renderPreset() {
+  if (!state.fixture) {
+    elements.presetList.innerHTML = "";
+    elements.viewCaption.textContent = "Loading preset...";
+    return;
   }
 
-  render();
+  const preset = state.run ? state.run.preset : state.fixture.observatory;
+  elements.viewCaption.textContent = preset.note;
+  const rows = [
+    ["Preset", preset.label],
+    ["Spin", String(preset.spin)],
+    ["Inclination", `${preset.inclinationDeg} deg`],
+    ["Mass", `${preset.massBillionsSolar} billion solar masses`],
+    ["Distance", `${preset.distanceMly} million light-years`],
+    ["Exposure", preset.exposure]
+  ];
+  elements.presetList.innerHTML = rows.map(([label, value]) => `<li><strong>${label}</strong><br><span>${value}</span></li>`).join("");
 }
 
-async function runFrameProbe() {
-  ensureEnvironment();
-  const deltas = [];
-
-  await new Promise((resolve) => {
-    let previous = 0;
-    function step(timestamp) {
-      if (previous !== 0) {
-        deltas.push(timestamp - previous);
-      }
-      previous = timestamp;
-
-      if (deltas.length >= 120) {
-        resolve();
-        return;
-      }
-
-      requestAnimationFrame(step);
-    }
-
-    requestAnimationFrame(step);
-  });
-
-  const avgDelta = deltas.reduce((total, value) => total + value, 0) / deltas.length;
-  state.probes.frame = {
-    avgFrameMs: avgDelta,
-    avgFps: avgDelta > 0 ? 1000 / avgDelta : 0,
-    p95FrameMs: percentile(deltas, 0.95)
-  };
-  log("Frame probe captured " + deltas.length + " frames.");
-  render();
-}
-
-async function runWorkerProbe() {
-  ensureEnvironment();
-  const workerScript = "self.onmessage = (event) => { if (event.data === 'ping') { self.postMessage(performance.now()); } };";
-  const workerUrl = URL.createObjectURL(new Blob([workerScript], { type: "text/javascript" }));
-  const probeWorker = new Worker(workerUrl);
-  const roundTrips = [];
-
-  try {
-    for (let index = 0; index < 20; index += 1) {
-      const sample = await new Promise((resolve, reject) => {
-        const startedAt = performance.now();
-        const timeout = setTimeout(() => reject(new Error("Worker probe timed out")), 2000);
-
-        probeWorker.onmessage = () => {
-          clearTimeout(timeout);
-          resolve(performance.now() - startedAt);
-        };
-
-        probeWorker.postMessage("ping");
-      });
-      roundTrips.push(sample);
-    }
-
-    const avgRtt = roundTrips.reduce((total, value) => total + value, 0) / roundTrips.length;
-    state.probes.worker = {
-      avgRttMs: avgRtt,
-      p95RttMs: percentile(roundTrips, 0.95)
-    };
-    log("Worker probe completed with " + roundTrips.length + " round-trips.");
-  } catch (error) {
-    state.probes.worker = {
-      avgRttMs: null,
-      p95RttMs: null,
-      error: error instanceof Error ? error.message : String(error)
-    };
-    log("Worker probe failed: " + state.probes.worker.error + ".");
-  } finally {
-    probeWorker.terminate();
-    URL.revokeObjectURL(workerUrl);
+function renderControls() {
+  if (!state.fixture) {
+    elements.controlList.innerHTML = "";
+    return;
   }
-
-  render();
+  elements.controlList.innerHTML = state.fixture.controlDeck
+    .map((item) => `<li><strong>${item.label}</strong><br><span>${item.value}</span></li>`)
+    .join("");
 }
 
-function downloadJson() {
-  const payload = JSON.stringify(schemaResult(), null, 2);
-  const blob = new Blob([payload], { type: "application/json" });
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = metadata.repo + "-baseline-probe.json";
-  anchor.click();
-  URL.revokeObjectURL(objectUrl);
-  log("Downloaded schema-aligned baseline JSON draft.");
+function renderFixture() {
+  if (!state.fixture) {
+    elements.fixtureView.textContent = "Loading observatory fixture...";
+    return;
+  }
+  elements.fixtureView.textContent = JSON.stringify({
+    observatory: state.fixture.observatory,
+    profiles: state.fixture.profiles.map((profile) => ({
+      id: profile.id,
+      renderer: profile.renderer,
+      observatoryScore: profile.observatoryScore,
+      scienceAlignment: profile.scienceAlignment,
+      raySteps: profile.raySteps
+    })),
+    controlDeck: state.fixture.controlDeck
+  }, null, 2);
+}
+
+function renderMetrics() {
+  const run = state.run;
+  const cards = [
+    ["Winner", run ? run.winner.label : "pending"],
+    ["Avg FPS", run ? String(run.winner.avgFps) : "pending"],
+    ["P95 Frametime", run ? `${run.winner.p95FrameMs} ms` : "pending"],
+    ["Scene Load", run ? `${run.winner.sceneLoadMs} ms` : "pending"],
+    ["Photon Ring", run ? `${run.preset.photonRingRadiusPx}px` : "pending"],
+    ["Lensing Arc", run ? String(run.preset.lensingArcPct) : "pending"],
+    ["Science Alignment", run ? String(run.winner.scienceAlignment) : "pending"],
+    ["Consensus Score", run ? String(run.winner.observatoryScore) : "pending"]
+  ];
+  elements.metricGrid.innerHTML = cards
+    .map(([label, value]) => `<article class="metric-card"><span>${label}</span><strong>${value}</strong></article>`)
+    .join("");
+}
+
+function renderMeta() {
+  const run = state.run;
+  const winner = run ? run.winner : null;
+  const preset = run ? run.preset : state.fixture ? state.fixture.observatory : null;
+  const cards = [
+    ["Backend", state.environment.backend],
+    ["Worker Mode", state.environment.worker_mode],
+    ["GPU Adapter", state.environment.gpu.adapter],
+    ["Preset", preset ? preset.capturePreset : "pending"],
+    ["Winner Renderer", winner ? winner.renderer : "pending"],
+    ["Ray Steps", winner ? String(winner.raySteps) : "pending"],
+    ["TAA", winner ? String(winner.taaEnabled) : "pending"],
+    ["Checksum", preset ? String(preset.geodesicChecksum) : "pending"]
+  ];
+  elements.metaGrid.innerHTML = cards
+    .map(([label, value]) => `<article class="meta-card"><span>${label}</span><strong>${value}</strong></article>`)
+    .join("");
+}
+
+function renderLogs() {
+  elements.logList.textContent = state.logs.length ? state.logs.join("\n") : "No events yet.";
+}
+
+function renderResultJson() {
+  elements.resultJson.textContent = JSON.stringify(buildResult(), null, 2);
 }
 
 function render() {
-  renderMeta();
   renderStatus();
+  renderProfiles();
+  renderPreset();
+  renderControls();
+  renderFixture();
   renderMetrics();
-  renderJson();
+  renderMeta();
+  renderLogs();
+  renderResultJson();
+  elements.downloadJson.disabled = !state.run;
 }
 
-elements.detectEnvironment.addEventListener("click", detectEnvironment);
-elements.runWebgpu.addEventListener("click", runWebgpuProbe);
-elements.runFrame.addEventListener("click", runFrameProbe);
-elements.runWorker.addEventListener("click", runWorkerProbe);
-elements.downloadJson.addEventListener("click", downloadJson);
+function downloadResult() {
+  if (!state.run) return;
+  const blob = new Blob([`${JSON.stringify(buildResult(), null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `app-blackhole-observatory-${state.run ? "demo" : "pending"}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
-renderList(elements.focusList, focusItems());
-renderList(elements.nextSteps, nextSteps());
-log("Baseline probe ready. Capture environment first, then run WebGPU, frame, and worker probes.");
-detectEnvironment();
-render();
+elements.runObservatory.addEventListener("click", () => {
+  runObservatory().catch((error) => {
+    state.active = false;
+    log(`Run failed: ${error.message}`);
+    render();
+  });
+});
+elements.downloadJson.addEventListener("click", downloadResult);
+
+drawPlaceholder();
+loadFixture().then(render).catch((error) => {
+  log(`Fixture load failed: ${error.message}`);
+  render();
+});
