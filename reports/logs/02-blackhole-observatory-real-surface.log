@@ -1,0 +1,127 @@
+repo=app-blackhole-observatory
+scenario=Blackhole Observatory / Real Surface
+url_search=?mode=real-surface
+captured_at=2026-05-20T15:34:02.053Z
+browser=Chromium 147.0.7727.15
+headless=true
+meta_scenario=blackhole-observatory-demo
+status=success
+
+[page-console]
+[console:error] Failed to load resource: the server responded with a status of 404 ()
+[console:warning] [real-surface] bootstrap failed: manifest fetch failed for https://ai-webgpu-lab.github.io/app-blackhole-observatory/manifests/observatory-v1.json
+
+[harness-logs]
+./reports/logs/02-blackhole-observatory-real-surface.log
+
+[result-json]
+{
+  "meta": {
+    "repo": "app-blackhole-observatory",
+    "commit": "9a343ed",
+    "timestamp": "2026-05-20T15:34:01.881Z",
+    "owner": "ai-webgpu-lab",
+    "track": "integration",
+    "scenario": "blackhole-observatory-demo",
+    "notes": "preset=m87-horizon-v1; winner=kerr-science-engine; observatory_score=0.928; checksum=0.98241; realAdapter=fallback(manifest fetch failed for https://ai-webgpu-lab.github.io/app-blackhole-observatory/manifests/observatory-v1.json); automation=playwright-chromium",
+    "capture_context": {
+      "tool": "playwright-chromium",
+      "browser_name": "Chromium",
+      "browser_version": "147.0.7727.15",
+      "headless": true,
+      "captured_at": "2026-05-20T15:34:02.053Z",
+      "captured_by": "codex"
+    },
+    "capture_scenario_id": "02-blackhole-observatory-real-surface",
+    "capture_url_search": "?mode=real-surface"
+  },
+  "environment": {
+    "browser": {
+      "name": "Chrome",
+      "version": "147.0.7727.15"
+    },
+    "os": {
+      "name": "Linux",
+      "version": "unknown"
+    },
+    "device": {
+      "name": "Linux x86_64",
+      "class": "desktop-high",
+      "cpu": "16 threads",
+      "memory_gb": 32,
+      "power_mode": "unknown"
+    },
+    "gpu": {
+      "adapter": "navigator.gpu available",
+      "required_features": [
+        "shader-f16",
+        "timestamp-query"
+      ],
+      "limits": {
+        "maxTextureDimension2D": 8192,
+        "maxBindGroups": 4
+      }
+    },
+    "backend": "browser-fixture",
+    "fallback_triggered": false,
+    "worker_mode": "hybrid",
+    "cache_state": "warm"
+  },
+  "workload": {
+    "kind": "blackhole-observatory",
+    "name": "blackhole-observatory-demo",
+    "input_profile": "widefield-balanced",
+    "model_id": "kerr-science-engine",
+    "renderer": "rust-wasm-kerr"
+  },
+  "metrics": {
+    "common": {
+      "time_to_interactive_ms": 745.8,
+      "init_ms": 53,
+      "success_rate": 1,
+      "peak_memory_note": "32 GB reported by browser",
+      "error_type": ""
+    },
+    "graphics": {
+      "avg_fps": 58.9,
+      "p95_frametime_ms": 20.7,
+      "scene_load_ms": 53,
+      "ray_steps": 128,
+      "taa_enabled": true,
+      "resolution_scale": 0.78
+    },
+    "blackhole": {
+      "spin": 0.91,
+      "inclination_deg": 64,
+      "photon_ring_radius_px": 96,
+      "lensing_arc_pct": 0.87,
+      "geodesic_checksum": 0.98241,
+      "renderer_consensus_score": 0.928,
+      "science_alignment_score": 0.99
+    }
+  },
+  "status": "success",
+  "artifacts": {
+    "raw_logs": [
+      "./reports/logs/02-blackhole-observatory-real-surface.log"
+    ],
+    "deploy_url": "https://ai-webgpu-lab.github.io/app-blackhole-observatory/",
+    "app_surface_adapter": {
+      "id": "stub-not-connected",
+      "label": "App Surface Adapter Stub (not connected)",
+      "status": "not-connected",
+      "isReal": false,
+      "version": "n/a",
+      "capabilities": [
+        "preset-replay",
+        "renderer-scorecard",
+        "telemetry-record"
+      ],
+      "surfaceType": "stub",
+      "message": "No real app surface adapter has registered for mode='real-surface'. Falling back to the deterministic harness."
+    },
+    "screenshots": [
+      "./reports/screenshots/02-blackhole-observatory-real-surface.png"
+    ]
+  }
+}
